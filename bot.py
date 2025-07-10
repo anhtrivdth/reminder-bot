@@ -1,129 +1,133 @@
-import os
 import json
-from datetime import datetime, date
-from telegram.ext import Updater, CommandHandler
-import threading
-import time
+import os
+import logging
+from datetime import datetime, timedelta
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+from apscheduler.schedulers.background import BackgroundScheduler
+from uuid import uuid4
 
-# 🔐 Telegram Token từ biến môi trường
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATA_FILE = "data.json"
 
-# 📦 Load hoặc tạo dữ liệu nếu chưa có
-def load_reminders():
-    if not os.path.exists(DATA_FILE) or os.stat(DATA_FILE).st_size == 0:
-        with open(DATA_FILE, "w") as f:
-            json.dump([], f)
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def save_reminders(reminders):
-    with open(DATA_FILE, "w") as f:
-        json.dump(reminders, f, indent=2)
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return []
+    with open(DATA_FILE, "r") as file:
+        try:
+            return json.load(file)
+        except json.JSONDecodeError:
+            return []
 
-# ➕ /add [ngày] [nội dung]
-def add(update, context):
+def save_data(data):
+    with open(DATA_FILE, "w") as file:
+        json.dump(data, file, indent=4)
+
+def send_reminder(context: CallbackContext, chat_id, message):
+    context.bot.send_message(chat_id=chat_id, text=message)
+
+def check_reminders(context: CallbackContext):
+    now = datetime.now()
+    data = load_data()
+    for item in data:
+        reminder_day = int(item["day"])
+        chat_id = item["chat_id"]
+        message = item["message"]
+        id_ = item["id"]
+
+        # Tạo ngày tháng hiện tại với ngày nhắc
+        try:
+            this_month = now.replace(day=reminder_day, hour=8, minute=0, second=0, microsecond=0)
+        except ValueError:
+            # Ngày không hợp lệ với tháng hiện tại
+            continue
+
+        diff_days = (this_month.date() - now.date()).days
+        if diff_days == 2:
+            send_reminder(context, chat_id, f"⏰ Còn 2 ngày để thanh toán: {message}")
+        elif diff_days == 1:
+            send_reminder(context, chat_id, f"⏰ Còn 1 ngày để thanh toán: {message}")
+        elif diff_days == 0 and now.hour == 8:
+            send_reminder(context, chat_id, f"🚨 GẤP! Thanh toán ngay: {message}")
+
+def add_reminder(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    print(f"📌 Chat ID: {chat_id}")  # ✅ In ra chat_id khi dùng /add
+
     args = context.args
     if len(args) < 2:
-        update.message.reply_text("❌ Dùng: /add [ngày] [nội dung nhắc]")
+        update.message.reply_text("❌ Cú pháp sai. Dùng: /add [ngày] [nội dung nhắc]")
         return
-    try:
-        day = int(args[0])
-        if not 1 <= day <= 31:
-            update.message.reply_text("❌ Ngày phải từ 1 đến 31.")
-            return
-    except:
-        update.message.reply_text("❌ Ngày không hợp lệ.")
+    day = args[0]
+    if not day.isdigit() or not (1 <= int(day) <= 31):
+        update.message.reply_text("❌ Ngày phải từ 1 đến 31.")
         return
-
-    text = " ".join(args[1:])
-    reminders = load_reminders()
-    new_id = max([r["id"] for r in reminders], default=0) + 1
-    reminders.append({
+    message = " ".join(args[1:])
+    data = load_data()
+    new_id = len(data) + 1
+    data.append({
         "id": new_id,
-        "day": day,
-        "text": text,
-        "chat_id": update.message.chat_id
+        "day": int(day),
+        "message": message,
+        "chat_id": chat_id
     })
-    save_reminders(reminders)
-    update.message.reply_text(f"✅ Đã lưu nhắc: ngày {day} - {text}")
+    save_data(data)
+    update.message.reply_text(f"✅ Đã thêm lời nhắc ID {new_id}: Ngày {day} - {message}")
 
-# 📋 /list
-def list_reminders(update, context):
+def list_reminders(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
-    reminders = load_reminders()
-    user_reminders = [r for r in reminders if r["chat_id"] == chat_id]
-    if not user_reminders:
-        update.message.reply_text("📭 Bạn chưa có lời nhắc nào.")
+    data = load_data()
+    reminders = [r for r in data if r["chat_id"] == chat_id]
+    if not reminders:
+        update.message.reply_text("📭 Không có lời nhắc nào.")
         return
-    reply = "📋 Danh sách lời nhắc:\n"
-    for r in user_reminders:
-        reply += f"🔸 ID {r['id']}: Ngày {r['day']} - {r['text']}\n"
-    update.message.reply_text(reply)
+    msg = "📋 Danh sách lời nhắc:\n"
+    for r in reminders:
+        msg += f"🔹 ID {r['id']}: Ngày {r['day']} - {r['message']}\n"
+    update.message.reply_text(msg)
 
-# ❌ /remove [id]
-def remove_reminder(update, context):
+def remove_reminder(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
     args = context.args
-    if len(args) != 1:
+    if len(args) != 1 or not args[0].isdigit():
         update.message.reply_text("❌ Dùng: /remove [id]")
         return
-    try:
-        rid = int(args[0])
-    except:
-        update.message.reply_text("❌ ID phải là số.")
-        return
-
-    reminders = load_reminders()
-    new_reminders = [r for r in reminders if r["id"] != rid or r["chat_id"] != update.message.chat_id]
-    if len(new_reminders) == len(reminders):
-        update.message.reply_text("⚠️ Không tìm thấy ID đó.")
+    rem_id = int(args[0])
+    data = load_data()
+    new_data = [r for r in data if not (r["id"] == rem_id and r["chat_id"] == chat_id)]
+    if len(data) == len(new_data):
+        update.message.reply_text("❌ Không tìm thấy ID.")
     else:
-        save_reminders(new_reminders)
-        update.message.reply_text(f"✅ Đã xóa lời nhắc ID {rid}")
+        save_data(new_data)
+        update.message.reply_text(f"🗑️ Đã xóa lời nhắc ID {rem_id}.")
 
-# ⏰ Kiểm tra và gửi lời nhắc (mỗi sáng 8h)
-def check_and_send_reminders():
-    today = date.today()
-    reminders = load_reminders()
-    for r in reminders:
-        chat_id = r["chat_id"]
-        text = r["text"]
-        reminder_day = int(r["day"])
-        try:
-            reminder_date = date(today.year, today.month, reminder_day)
-        except:
-            continue  # ví dụ: 31/2 không tồn tại
+def start(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    print(f"👋 /start từ chat_id: {chat_id}")  # ✅ In ra chat_id khi bắt đầu
+    update.message.reply_text("🤖 Bot đang chạy! Dùng /add [ngày] [nội dung] để thêm lời nhắc.")
 
-        delta = (reminder_date - today).days
+def main():
+    TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-        if delta == 2:
-            bot.send_message(chat_id, f"⏰ Còn 2 ngày để thanh toán: {text}")
-        elif delta == 1:
-            bot.send_message(chat_id, f"⚠️ Còn 1 ngày để thanh toán: {text}")
-        elif delta == 0:
-            bot.send_message(chat_id, f"🚨 Gấp! Thanh toán ngay: {text}")
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("add", add_reminder))
+    dp.add_handler(CommandHandler("list", list_reminders))
+    dp.add_handler(CommandHandler("remove", remove_reminder))
 
-# 🔁 Thread chạy nhắc lúc 8:00 mỗi ngày
-def run_scheduler():
-    while True:
-        now = datetime.now()
-        if now.hour == 8 and now.minute == 0:
-            check_and_send_reminders()
-            time.sleep(60)  # tránh lặp trong cùng phút
-        time.sleep(20)
+    # Nếu muốn in chat_id bất kỳ tin nhắn nào:
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, lambda u, c: print(f"📨 Tin nhắn từ chat_id: {u.message.chat_id}")))
 
-# 🚀 Khởi tạo bot
-updater = Updater(token=TOKEN, use_context=True)
-dp = updater.dispatcher
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: check_reminders(updater.bot), "interval", hours=1)
+    scheduler.start()
 
-dp.add_handler(CommandHandler("add", add))
-dp.add_handler(CommandHandler("list", list_reminders))
-dp.add_handler(CommandHandler("remove", remove_reminder))
+    print("⚙️ Bot đang chạy...")
+    updater.start_polling()
+    updater.idle()
 
-bot = updater.bot
-
-threading.Thread(target=run_scheduler, daemon=True).start()
-
-print("🤖 Bot đang chạy...")
-updater.start_polling()
-updater.idle()
+if __name__ == "__main__":
+    main()
