@@ -109,7 +109,7 @@ def start(update: Update, context: CallbackContext):
     update.message.reply_text("🤖 Bot đang chạy! Dùng /add [ngày] [nội dung] để thêm lời nhắc.")
 
 def main():
-    TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+    TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
